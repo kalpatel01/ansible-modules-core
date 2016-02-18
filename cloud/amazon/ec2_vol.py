@@ -100,6 +100,18 @@ options:
     default: present
     choices: ['absent', 'present', 'list']
     version_added: "1.6"
+  kms_key_id:
+    description:
+      - If encrypted is True, the KMS Key ID may be specified.
+        e.g.: arn:aws:kms:us-east-1:012345678910:key/abcd1234-a123-456a-a12b-a123b4cd56ef
+    required: false
+    default: None
+    version_added: 1.38
+  tags:
+    description:
+      - add additional tags to a volume.
+    required: false
+    default: null
 author: "Lester Wade (@lwade)"
 extends_documentation_fragment:
     - aws
@@ -125,6 +137,14 @@ EXAMPLES = '''
     instance: XXXXXX
     snapshot: "{{ snapshot }}"
 
+# Example using encrypted with kms key
+- ec2_vol:
+    instance: XXXXXX
+    volume_size: 5
+    device_name: sdd
+    encrypted: true
+    kms_key_id: arn:aws:kms:us-east-1:012345678910:key/abcd1234-a123-456a-a12b-a123b4cd56ef
+
 # Playbook example combined with instance launch
 - ec2:
     keypair: "{{ keypair }}"
@@ -135,6 +155,8 @@ EXAMPLES = '''
 - ec2_vol:
     instance: "{{ item.id }} "
     volume_size: 5
+    tags:
+      id: my_volume
   with_items: ec2.instances
   register: ec2_vol
 
@@ -244,6 +266,8 @@ try:
 except ImportError:
     HAS_BOTO = False
 
+class AnsibleAWSError(Exception):
+    pass
 
 def get_volume(module, ec2):
     name = module.params.get('name')
@@ -311,9 +335,18 @@ def boto_supports_volume_encryption():
     Check if Boto library supports encryption of EBS volumes (added in 2.29.0)
 
     Returns:
-        True if boto library has the named param as an argument on the request_spot_instances method, else False
+        True if version is equal to or higher then the version needed, else False
     """
     return hasattr(boto, 'Version') and LooseVersion(boto.Version) >= LooseVersion('2.29.0')
+
+def boto_supports_kms_id():
+    """
+    Check if Boto library supports kms_ids (added in 2.39.0)
+
+    Returns:
+        True if version is equal to or higher then the version needed, else False
+    """
+    return hasattr(boto, 'Version') and LooseVersion(boto.Version) >= LooseVersion('2.39.0')
 
 
 def create_volume(module, ec2, zone):
@@ -324,6 +357,8 @@ def create_volume(module, ec2, zone):
     volume_size = module.params.get('volume_size')
     volume_type = module.params.get('volume_type')
     snapshot = module.params.get('snapshot')
+    kms_key_id = module.params.get('kms_key_id')
+    tags = module.params.get('tags')
     # If custom iops is defined we use volume_type "io1" rather than the default of "standard"
     if iops:
         volume_type = 'io1'
@@ -332,7 +367,17 @@ def create_volume(module, ec2, zone):
     if volume is None:
         try:
             if boto_supports_volume_encryption():
-                volume = ec2.create_volume(volume_size, zone, snapshot, volume_type, iops, encrypted)
+                if kms_key_id and encrypted:
+                    # According to documentation kms keys are implemented.
+                    # http://boto.cloudhackers.com/en/latest/ref/ec2.html
+                    # but some releases do not include the updated connection.py.
+                    # Hence why this check exists.
+                    try:
+                        volume = ec2.create_volume(volume_size, zone, snapshot, volume_type, iops, encrypted, kms_key_id)
+                    except TypeError as e:
+                        module.fail_json(msg="Current python module does not support kms keys.")
+                else:
+                    volume = ec2.create_volume(volume_size, zone, snapshot, volume_type, iops, encrypted)
                 changed = True
             else:
                 volume = ec2.create_volume(volume_size, zone, snapshot, volume_type, iops)
@@ -344,7 +389,12 @@ def create_volume(module, ec2, zone):
 
             if name:
                 ec2.create_tags([volume.id], {"Name": name})
-        except boto.exception.BotoServerError as e:
+
+            if tags:
+                for tag, value in tags.iteritems():
+                    ec2.create_tags([volume.id], {tag: value})
+
+        except boto.exception.BotoServerError, e:
             module.fail_json(msg = "%s: %s" % (e.error_code, e.error_message))
 
     return volume, changed
@@ -487,7 +537,9 @@ def main():
             delete_on_termination = dict(type='bool', default=False),
             zone = dict(aliases=['availability_zone', 'aws_zone', 'ec2_zone']),
             snapshot = dict(),
-            state = dict(choices=['absent', 'present', 'list'], default='present')
+            state = dict(choices=['absent', 'present', 'list'], default='present'),
+            kms_key_id = dict(),
+            tags = dict()
         )
     )
     module = AnsibleModule(argument_spec=argument_spec)
@@ -504,6 +556,8 @@ def main():
     zone = module.params.get('zone')
     snapshot = module.params.get('snapshot')
     state = module.params.get('state')
+    kms_key_id = module.params.get('kms_key_id')
+    tags = module.params.get('tags')
 
     # Ensure we have the zone or can get the zone
     if instance is None and zone is None and state == 'present':
@@ -542,6 +596,9 @@ def main():
 
     if encrypted and not boto_supports_volume_encryption():
         module.fail_json(msg="You must use boto >= v2.29.0 to use encrypted volumes")
+
+    if kms_key_id and not boto_supports_kms_id():
+        module.fail_json(msg="You must use boto >= v2.39.0 to use kms_id")
 
     # Here we need to get the zone info for the instance. This covers situation where
     # instance is specified but zone isn't.
