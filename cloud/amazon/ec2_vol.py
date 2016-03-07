@@ -106,7 +106,7 @@ options:
         e.g.: arn:aws:kms:us-east-1:012345678910:key/abcd1234-a123-456a-a12b-a123b4cd56ef
     required: false
     default: None
-    version_added: 1.38
+    version_added: 2.39
   tags:
     description:
       - add additional tags to a volume.
@@ -142,7 +142,6 @@ EXAMPLES = '''
     instance: XXXXXX
     volume_size: 5
     device_name: sdd
-    encrypted: true
     kms_key_id: arn:aws:kms:us-east-1:012345678910:key/abcd1234-a123-456a-a12b-a123b4cd56ef
 
 # Playbook example combined with instance launch
@@ -363,14 +362,16 @@ def create_volume(module, ec2, zone):
     if iops:
         volume_type = 'io1'
 
+    if kms_key_id:
+        encrypted = True
+
     volume = get_volume(module, ec2)
     if volume is None:
         try:
             if boto_supports_volume_encryption():
-                if kms_key_id and encrypted:
-                    # According to documentation kms keys are implemented.
+                if kms_key_id:
                     # http://boto.cloudhackers.com/en/latest/ref/ec2.html
-                    # but some releases do not include the updated connection.py.
+                    # Some releases do not include the updated connection.py.
                     # Hence why this check exists.
                     try:
                         volume = ec2.create_volume(volume_size, zone, snapshot, volume_type, iops, encrypted, kms_key_id)
