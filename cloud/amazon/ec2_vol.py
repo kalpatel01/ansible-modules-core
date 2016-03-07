@@ -102,7 +102,7 @@ options:
     version_added: "1.6"
   kms_key_id:
     description:
-      - If encrypted is True, the KMS Key ID may be specified.
+      - full arn of the kms key id is required.
         e.g.: arn:aws:kms:us-east-1:012345678910:key/abcd1234-a123-456a-a12b-a123b4cd56ef
     required: false
     default: None
