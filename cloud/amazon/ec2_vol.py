@@ -531,7 +531,7 @@ def main():
             id = dict(),
             name = dict(),
             volume_size = dict(),
-            volume_type = dict(choices=['standard', 'gp2', 'io1'], default='standard'),
+            volume_type = dict(choices=['standard', 'gp2', 'io1', 'sc1', 'st1'], default='standard'),
             iops = dict(),
             encrypted = dict(type='bool', default=False),
             device_name = dict(),
