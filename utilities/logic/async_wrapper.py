@@ -32,7 +32,6 @@ import signal
 import time
 import syslog
 
-
 syslog.openlog('ansible-%s' % os.path.basename(__file__))
 syslog.syslog(syslog.LOG_NOTICE, 'Invoked with %s' % " ".join(sys.argv[1:]))
 
@@ -46,14 +45,14 @@ def daemonize_self():
         if pid > 0:
             # exit first parent
             sys.exit(0)
-    except OSError, e:
-        print >>sys.stderr, "fork #1 failed: %d (%s)" % (e.errno, e.strerror)
-        sys.exit(1)
+    except OSError:
+        e = sys.exc_info()[1]
+        sys.exit("fork #1 failed: %d (%s)\n" % (e.errno, e.strerror))
 
     # decouple from parent environment
     os.chdir("/")
     os.setsid()
-    os.umask(022)
+    os.umask(int('022', 8))
 
     # do second fork
     try:
@@ -61,9 +60,9 @@ def daemonize_self():
         if pid > 0:
             # print "Daemon PID %d" % pid
             sys.exit(0)
-    except OSError, e:
-        print >>sys.stderr, "fork #2 failed: %d (%s)" % (e.errno, e.strerror)
-        sys.exit(1)
+    except OSError:
+        e = sys.exc_info()[1]
+        sys.exit("fork #2 failed: %d (%s)\n" % (e.errno, e.strerror))
 
     dev_null = file('/dev/null','rw')
     os.dup2(dev_null.fileno(), sys.stdin.fileno())
@@ -87,7 +86,8 @@ def _run_module(wrapped_cmd, jid, job_path):
         outdata = file(job_path).read()
         result = json.loads(outdata)
 
-    except (OSError, IOError), e:
+    except (OSError, IOError):
+        e = sys.exc_info()[1]
         result = {
             "failed": 1,
             "cmd" : wrapped_cmd,
@@ -113,17 +113,20 @@ def _run_module(wrapped_cmd, jid, job_path):
 if __name__ == '__main__':
 
     if len(sys.argv) < 3:
-        print json.dumps({
+        print(json.dumps({
             "failed" : True,
             "msg"    : "usage: async_wrapper <jid> <time_limit> <modulescript> <argsfile>.  Humans, do not call directly!"
-        })
+        }))
         sys.exit(1)
 
     jid = "%s.%d" % (sys.argv[1], os.getpid())
     time_limit = sys.argv[2]
     wrapped_module = sys.argv[3]
-    argsfile = sys.argv[4]
-    cmd = "%s %s" % (wrapped_module, argsfile)
+    if len(sys.argv) >= 5:
+        argsfile = sys.argv[4]
+        cmd = "%s %s" % (wrapped_module, argsfile)
+    else:
+        cmd = wrapped_module
     step = 5
 
     # setup job output directory
@@ -134,10 +137,10 @@ if __name__ == '__main__':
         try:
             os.makedirs(jobdir)
         except:
-            print json.dumps({
+            print(json.dumps({
                 "failed" : 1,
                 "msg" : "could not create: %s" % jobdir
-            })
+            }))
     # immediately exit this process, leaving an orphaned process
     # running which immediately forks a supervisory timing process
 
@@ -151,7 +154,7 @@ if __name__ == '__main__':
             # this probably could be done with some IPC later.  Modules should always read
             # the argsfile at the very first start of their execution anyway
             notice("Return async_wrapper task started.")
-            print json.dumps({ "started" : 1, "ansible_job_id" : jid, "results_file" : job_path })
+            print(json.dumps({ "started" : 1, "ansible_job_id" : jid, "results_file" : job_path }))
             sys.stdout.flush()
             time.sleep(1)
             sys.exit(0)
@@ -193,10 +196,16 @@ if __name__ == '__main__':
                 notice("Module complete (%s)"%os.getpid())
                 sys.exit(0)
 
-    except Exception, err:
-        notice("error: %s"%(err))
-        print json.dumps({
+    except SystemExit:
+        # On python2.4, SystemExit is a subclass of Exception.
+        # This block makes python2.4 behave the same as python2.5+
+        raise
+
+    except Exception:
+        e = sys.exc_info()[1]
+        notice("error: %s"%(e))
+        print(json.dumps({
             "failed" : True,
-            "msg"    : "FATAL ERROR: %s" % str(err)
-        })
+            "msg"    : "FATAL ERROR: %s" % str(e)
+        }))
         sys.exit(1)

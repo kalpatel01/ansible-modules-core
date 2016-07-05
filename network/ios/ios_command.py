@@ -79,9 +79,9 @@ EXAMPLES = """
       - "result[0] contains IOS"
 
 - ios_command:
-  commands:
-    - show version
-    - show interfaces
+    commands:
+      - show version
+      - show interfaces
 
 """
 
@@ -135,7 +135,8 @@ def main():
         queue = set()
         for entry in (module.params['waitfor'] or list()):
             queue.add(Conditional(entry))
-    except AttributeError, exc:
+    except AttributeError:
+        exc = get_exception()
         module.fail_json(msg=exc.message)
 
     result = dict(changed=False)

@@ -20,7 +20,7 @@ DOCUMENTATION = """
 ---
 module: nxos_command
 version_added: "2.1"
-author: "Peter sprygada (@privateip)"
+author: "Peter Sprygada (@privateip)"
 short_description: Run arbitrary command on Cisco NXOS devices
 description:
   - Sends an aribtrary command to an NXOS node and returns the results
@@ -62,7 +62,6 @@ options:
         trying the command again.
     required: false
     default: 1
-
 """
 
 EXAMPLES = """
@@ -118,21 +117,14 @@ failed_conditions:
 import time
 import shlex
 import re
-import json
 
 INDEX_RE = re.compile(r'(\[\d+\])')
 
-def to_lines(stdout):
+def iterlines(stdout):
     for item in stdout:
         if isinstance(item, basestring):
             item = str(item).split('\n')
         yield item
-def get_response(data):
-    try:
-        json_data = json.loads(data)
-    except ValueError:
-        json_data = None
-    return dict(data=data, json=json_data)
 
 def main():
     spec = dict(
@@ -155,7 +147,8 @@ def main():
         queue = set()
         for entry in (module.params['waitfor'] or list()):
             queue.add(Conditional(entry))
-    except AttributeError, exc:
+    except AttributeError:
+        exc = get_exception()
         module.fail_json(msg=exc.message)
 
     result = dict(changed=False, result=list())
@@ -165,15 +158,18 @@ def main():
         kwargs['command_type'] = 'cli_show'
 
     while retries > 0:
-        try:
-            response = module.execute(commands, **kwargs)
-            result['stdout'] = response
-        except ShellError:
-            module.fail_json(msg='failed to run commands')
+        response = module.execute(commands, **kwargs)
+        result['stdout'] = response
 
         for index, cmd in enumerate(commands):
             if cmd.endswith('json'):
-                response[index] = json.loads(response[index])
+                try:
+                    response[index] = module.from_json(response[index])
+                except ValueError:
+                    exc = get_exception()
+                    module.fail_json(msg='failed to parse json response',
+                            exc_message=str(exc), response=response[index],
+                            cmd=cmd, response_dict=response)
 
         for item in list(queue):
             if item(response):
@@ -188,7 +184,7 @@ def main():
         failed_conditions = [item.raw for item in queue]
         module.fail_json(msg='timeout waiting for value', failed_conditions=failed_conditions)
 
-    result['stdout_lines'] = list(to_lines(result['stdout']))
+    result['stdout_lines'] = list(iterlines(result['stdout']))
     return module.exit_json(**result)
 
 

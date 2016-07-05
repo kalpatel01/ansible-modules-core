@@ -23,8 +23,8 @@ version_added: "2.1"
 author: "Peter sprygada (@privateip)"
 short_description: Run arbitrary command on EOS device
 description:
-  - Sends an aribtrary set of commands to and EOS node and returns the results
-    read from the device.  The M(eos_command) modulule includes an
+  - Sends an aribtrary set of commands to an EOS node and returns the results
+    read from the device.  The M(eos_command) module includes an
     argument that will cause the module to wait for a specific condition
     before returning or timing out if the condition is not met.
 extends_documentation_fragment: eos
@@ -35,7 +35,7 @@ options:
         configured provider.  The resulting output from the command
         is returned.  If the I(waitfor) argument is provided, the
         module is not returned until the condition is satisfied or
-        the number of retires as expired.
+        the number of retries has been exceeded.
     required: true
   waitfor:
     description:
@@ -48,7 +48,7 @@ options:
     default: null
   retries:
     description:
-      - Specifies the number of retries a command should by tried
+      - Specifies the number of retries a command should be tried
         before it is considered failed.  The command is run on the
         target device every retry and evaluated against the waitfor
         conditionals
@@ -62,7 +62,6 @@ options:
         trying the command again.
     required: false
     default: 1
-
 """
 
 EXAMPLES = """
@@ -99,7 +98,7 @@ stdout:
   sample: ['...', '...']
 
 stdout_lines:
-  description: The value of stdout split into a list
+  description: the value of stdout split into a list
   returned: always
   type: list
   sample: [['...', '...'], ['...'], ['...']]
@@ -114,11 +113,10 @@ failed_conditions:
 import time
 import shlex
 import re
-import json
 
 INDEX_RE = re.compile(r'(\[\d+\])')
 
-def to_lines(stdout):
+def iterlines(stdout):
     for item in stdout:
         if isinstance(item, basestring):
             item = str(item).split('\n')
@@ -144,7 +142,8 @@ def main():
         queue = set()
         for entry in (module.params['waitfor'] or list()):
             queue.add(Conditional(entry))
-    except AttributeError, exc:
+    except AttributeError:
+        exc = get_exception()
         module.fail_json(msg=exc.message)
 
     result = dict(changed=False)
@@ -155,7 +154,7 @@ def main():
 
         for index, cmd in enumerate(commands):
             if cmd.endswith('json'):
-                response[index] = json.loads(response[index])
+                response[index] = module.from_json(response[index])
 
         for item in list(queue):
             if item(response):
@@ -170,7 +169,7 @@ def main():
         failed_conditions = [item.raw for item in queue]
         module.fail_json(msg='timeout waiting for value', failed_conditions=failed_conditions)
 
-    result['stdout_lines'] = list(to_lines(result['stdout']))
+    result['stdout_lines'] = list(iterlines(result['stdout']))
     return module.exit_json(**result)
 
 

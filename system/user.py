@@ -279,16 +279,14 @@ class User(object):
         self.ssh_comment = module.params['ssh_key_comment']
         self.ssh_passphrase = module.params['ssh_key_passphrase']
         self.update_password = module.params['update_password']
-        self.home    = None
+        self.home    = module.params['home']
         self.expires = None
-
-        if module.params['home'] is not None:
-            self.home = os.path.expanduser(module.params['home'])
 
         if module.params['expires']:
             try:
                 self.expires = time.gmtime(module.params['expires'])
-            except Exception,e:
+            except Exception:
+                e = get_exception()
                 module.fail_json("Invalid expires time %s: %s" %(self.expires, str(e)))
 
         if module.params['ssh_key_file'] is not None:
@@ -432,7 +430,8 @@ class User(object):
                 cmd.append(self.group)
 
         if self.groups is not None:
-            current_groups = self.user_group_membership()
+            # get a list of all groups for the user, including the primary
+            current_groups = self.user_group_membership(exclude_primary=False)
             groups_need_mod = False
             groups = []
 
@@ -461,7 +460,6 @@ class User(object):
                 else:
                     cmd.append('-G')
                     cmd.append(','.join(groups))
-
 
         if self.comment is not None and info[4] != self.comment:
             cmd.append('-c')
@@ -525,12 +523,19 @@ class User(object):
                 groups.remove(g)
         return groups
 
-    def user_group_membership(self):
+    def user_group_membership(self, exclude_primary=True):
+        ''' Return a list of groups the user belongs to '''
         groups = []
         info = self.get_pwd_info()
         for group in grp.getgrall():
-            if self.name in group.gr_mem and not info[3] == group.gr_gid:
-                groups.append(group[0])
+            if self.name in group.gr_mem:
+                # Exclude the user's primary group by default
+                if not exclude_primary:
+                    groups.append(group[0])
+                else:
+                    if info[3] != group.gr_gid:
+                        groups.append(group[0])
+
         return groups
 
     def user_exists(self):
@@ -588,9 +593,10 @@ class User(object):
             if self.module.check_mode:
                 return (0, '', '')
             try:
-                os.mkdir(ssh_dir, 0700)
+                os.mkdir(ssh_dir, int('0700', 8))
                 os.chown(ssh_dir, info[2], info[3])
-            except OSError, e:
+            except OSError:
+                e = get_exception()
                 return (1, '', 'Failed to create %s: %s' % (ssh_dir, str(e)))
         if os.path.exists(ssh_key_file):
             return (None, 'Key already exists', '')
@@ -660,12 +666,14 @@ class User(object):
             if os.path.exists(skeleton):
                 try:
                     shutil.copytree(skeleton, path, symlinks=True)
-                except OSError, e:
+                except OSError:
+                    e = get_exception()
                     self.module.exit_json(failed=True, msg="%s" % e)
         else:
             try:
                 os.makedirs(path)
-            except OSError, e:
+            except OSError:
+                e = get_exception()
                 self.module.exit_json(failed=True, msg="%s" % e)
 
     def chown_homedir(self, uid, gid, path):
@@ -676,7 +684,8 @@ class User(object):
                     os.chown(path, uid, gid)
                 for f in files:
                     os.chown(os.path.join(root, f), uid, gid)
-        except OSError, e:
+        except OSError:
+            e = get_exception()
             self.module.exit_json(failed=True, msg="%s" % e)
 
 
@@ -1294,7 +1303,8 @@ class SunOS(User):
                         line = ':'.join(fields)
                         lines.append('%s\n' % line)
                     open(self.SHADOWFILE, 'w+').writelines(lines)
-                except Exception, err:
+                except Exception:
+                    err = get_exception()
                     self.module.fail_json(msg="failed to update users password: %s" % str(err))
 
         return (rc, out, err)
@@ -1381,7 +1391,8 @@ class SunOS(User):
                         lines.append('%s\n' % line)
                     open(self.SHADOWFILE, 'w+').writelines(lines)
                     rc = 0
-                except Exception, err:
+                except Exception:
+                    err = get_exception()
                     self.module.fail_json(msg="failed to update users password: %s" % str(err))
 
         return (rc, out, err)
@@ -2029,7 +2040,7 @@ def main():
             group=dict(default=None, type='str'),
             groups=dict(default=None, type='str'),
             comment=dict(default=None, type='str'),
-            home=dict(default=None, type='str'),
+            home=dict(default=None, type='path'),
             shell=dict(default=None, type='str'),
             password=dict(default=None, type='str', no_log=True),
             login_class=dict(default=None, type='str'),
@@ -2049,7 +2060,7 @@ def main():
             generate_ssh_key=dict(type='bool'),
             ssh_key_bits=dict(default=ssh_defaults['bits'], type='str'),
             ssh_key_type=dict(default=ssh_defaults['type'], type='str'),
-            ssh_key_file=dict(default=None, type='str'),
+            ssh_key_file=dict(default=None, type='path'),
             ssh_key_comment=dict(default=ssh_defaults['comment'], type='str'),
             ssh_key_passphrase=dict(default=None, type='str', no_log=True),
             update_password=dict(default='always',choices=['always','on_create'],type='str'),

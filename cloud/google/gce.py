@@ -96,6 +96,12 @@ options:
       - name of the network, 'default' will be used if not specified
     required: false
     default: "default"
+  subnetwork:
+    description:
+      - name of the subnetwork in which the instance should be created
+    required: false
+    default: null
+    version_added: "2.2"
   persistent_boot_disk:
     description:
       - if set, create the instance with a persistent boot disk
@@ -145,10 +151,18 @@ options:
       - if set boot disk will be removed after instance destruction
     required: false
     default: "true"
+  preemptible:
+    version_added: "2.1"
+    description:
+      - if set to true, instances will be preemptible and time-limited.
+        (requires libcloud >= 0.20.0)
+    required: false
+    default: "false"
 
 requirements:
     - "python >= 2.6"
-    - "apache-libcloud >= 0.13.3, >= 0.17.0 if using JSON credentials"
+    - "apache-libcloud >= 0.13.3, >= 0.17.0 if using JSON credentials,
+      >= 0.20.0 if using preemptible option"
 notes:
   - Either I(name) or I(instance_names) is required.
 author: "Eric Johnson (@erjohnso) <erjohnso@google.com>"
@@ -201,7 +215,7 @@ EXAMPLES = '''
 
 - name: Configure instance(s)
   hosts: launched
-  sudo: True
+  become: True
   roles:
     - my_awesome_role
     - my_awesome_tasks
@@ -277,6 +291,10 @@ def get_instance_info(inst):
         netname = inst.extra['networkInterfaces'][0]['network'].split('/')[-1]
     except:
         netname = None
+    try:
+        subnetname = inst.extra['networkInterfaces'][0]['subnetwork'].split('/')[-1]
+    except:
+        subnetname = None
     if 'disks' in inst.extra:
         disk_names = [disk_info['source'].split('/')[-1]
                       for disk_info
@@ -297,6 +315,7 @@ def get_instance_info(inst):
         'metadata': metadata,
         'name': inst.name,
         'network': netname,
+        'subnetwork': subnetname,
         'private_ip': inst.private_ips[0],
         'public_ip': public_ip,
         'status': ('status' in inst.extra) and inst.extra['status'] or None,
@@ -322,6 +341,7 @@ def create_instances(module, gce, instance_names):
     machine_type = module.params.get('machine_type')
     metadata = module.params.get('metadata')
     network = module.params.get('network')
+    subnetwork = module.params.get('subnetwork')
     persistent_boot_disk = module.params.get('persistent_boot_disk')
     disks = module.params.get('disks')
     state = module.params.get('state')
@@ -330,6 +350,7 @@ def create_instances(module, gce, instance_names):
     ip_forward = module.params.get('ip_forward')
     external_ip = module.params.get('external_ip')
     disk_auto_delete = module.params.get('disk_auto_delete')
+    preemptible = module.params.get('preemptible')
     service_account_permissions = module.params.get('service_account_permissions')
     service_account_email = module.params.get('service_account_email')
 
@@ -347,7 +368,7 @@ def create_instances(module, gce, instance_names):
                     instance_external_ip = gce.ex_get_address(instance_external_ip)
             else:
                 instance_external_ip = 'ephemeral'
-        except GoogleBaseError, e:
+        except GoogleBaseError as e:
             module.fail_json(msg='Unexpected error attempting to get a static ip %s, error: %s' % (external_ip, e.value))
     else:
         instance_external_ip = external_ip
@@ -355,7 +376,6 @@ def create_instances(module, gce, instance_names):
     new_instances = []
     changed = False
 
-    lc_image = gce.ex_get_image(image)
     lc_disks = []
     disk_modes = []
     for i, disk in enumerate(disks or []):
@@ -389,14 +409,15 @@ def create_instances(module, gce, instance_names):
             except SyntaxError as e:
                 module.fail_json(msg='bad metadata syntax')
 
-    if hasattr(libcloud, '__version__') and libcloud.__version__ < '0.15':
-        items = []
-        for k, v in md.items():
-            items.append({"key": k, "value": v})
-        metadata = {'items': items}
-    else:
-        metadata = md
+        if hasattr(libcloud, '__version__') and libcloud.__version__ < '0.15':
+            items = []
+            for k, v in md.items():
+                items.append({"key": k, "value": v})
+            metadata = {'items': items}
+        else:
+            metadata = md
 
+    lc_image = LazyDiskImage(module, gce, image, lc_disks)
     ex_sa_perms = []
     bad_perms = []
     if service_account_permissions:
@@ -409,7 +430,7 @@ def create_instances(module, gce, instance_names):
         ex_sa_perms[0]['scopes'] = service_account_permissions
 
     # These variables all have default values but check just in case
-    if not lc_image or not lc_network or not lc_machine_type or not lc_zone:
+    if not lc_network or not lc_machine_type or not lc_zone:
         module.fail_json(msg='Missing required create instance variable',
                          changed=False)
 
@@ -419,21 +440,30 @@ def create_instances(module, gce, instance_names):
             pd = lc_disks[0]
         elif persistent_boot_disk:
             try:
-                pd = gce.create_volume(None, "%s" % name, image=lc_image)
-            except ResourceExistsError:
                 pd = gce.ex_get_volume("%s" % name, lc_zone)
+            except ResourceNotFoundError:
+                pd = gce.create_volume(None, "%s" % name, image=lc_image())
+
+        gce_args = dict(
+            location=lc_zone,
+            ex_network=network, ex_tags=tags, ex_metadata=metadata,
+            ex_boot_disk=pd, ex_can_ip_forward=ip_forward,
+            external_ip=instance_external_ip, ex_disk_auto_delete=disk_auto_delete,
+            ex_service_accounts=ex_sa_perms
+        )
+        if preemptible is not None:
+            gce_args['ex_preemptible'] = preemptible
+        if subnetwork is not None:
+            gce_args['ex_subnetwork'] = subnetwork
+
         inst = None
         try:
+            inst = gce.ex_get_node(name, lc_zone)
+        except ResourceNotFoundError:
             inst = gce.create_node(
-                name, lc_machine_type, lc_image, location=lc_zone,
-                ex_network=network, ex_tags=tags, ex_metadata=metadata,
-                ex_boot_disk=pd, ex_can_ip_forward=ip_forward,
-                external_ip=instance_external_ip, ex_disk_auto_delete=disk_auto_delete,
-                ex_service_accounts=ex_sa_perms
+                name, lc_machine_type, lc_image(), **gce_args
             )
             changed = True
-        except ResourceExistsError:
-            inst = gce.ex_get_node(name, lc_zone)
         except GoogleBaseError as e:
             module.fail_json(msg='Unexpected error attempting to create ' +
                              'instance %s, error: %s' % (name, e.value))
@@ -511,6 +541,7 @@ def main():
             metadata = dict(),
             name = dict(),
             network = dict(default='default'),
+            subnetwork = dict(),
             persistent_boot_disk = dict(type='bool', default=False),
             disks = dict(type='list'),
             state = dict(choices=['active', 'present', 'absent', 'deleted'],
@@ -525,6 +556,7 @@ def main():
             ip_forward = dict(type='bool', default=False),
             external_ip=dict(default='ephemeral'),
             disk_auto_delete = dict(type='bool', default=True),
+            preemptible = dict(type='bool', default=None),
         )
     )
 
@@ -541,11 +573,13 @@ def main():
     metadata = module.params.get('metadata')
     name = module.params.get('name')
     network = module.params.get('network')
+    subnetwork = module.params.get('subnetwork')
     persistent_boot_disk = module.params.get('persistent_boot_disk')
     state = module.params.get('state')
     tags = module.params.get('tags')
     zone = module.params.get('zone')
     ip_forward = module.params.get('ip_forward')
+    preemptible = module.params.get('preemptible')
     changed = False
 
     inames = []
@@ -560,6 +594,14 @@ def main():
                          changed=False)
     if not zone:
         module.fail_json(msg='Must specify a "zone"', changed=False)
+
+    if preemptible is not None and hasattr(libcloud, '__version__') and libcloud.__version__ < '0.20':
+        module.fail_json(msg="Apache Libcloud 0.20.0+ is required to use 'preemptible' option",
+                         changed=False)
+
+    if subnetwork is not None and not hasattr(gce, 'ex_get_subnetwork'):
+        module.fail_json(msg="Apache Libcloud 1.0.0+ is required to use 'subnetwork' option",
+                         changed=False)
 
     json_output = {'zone': zone}
     if state in ['absent', 'deleted']:
@@ -586,6 +628,30 @@ def main():
 
     json_output['changed'] = changed
     module.exit_json(**json_output)
+
+
+class LazyDiskImage:
+    """
+    Object for lazy instantiation of disk image
+    gce.ex_get_image is a very expensive call, so we want to avoid calling it as much as possible.
+    """
+    def __init__(self, module, gce, name, has_pd):
+        self.image = None
+        self.was_called = False
+        self.gce = gce
+        self.name = name
+        self.has_pd = has_pd
+        self.module = module
+
+    def __call__(self):
+        if not self.was_called:
+            self.was_called = True
+            if not self.has_pd:
+                self.image = self.gce.ex_get_image(self.name)
+                if not self.image:
+                    self.module.fail_json(msg='image or disks missing for create instance', changed=False)
+        return self.image
+
 
 # import module snippets
 from ansible.module_utils.basic import *

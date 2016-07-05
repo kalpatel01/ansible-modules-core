@@ -514,27 +514,30 @@ class LinuxService(Service):
         value_buffer = []
         status_dict = {}
         for line in out.splitlines():
-            if not key:
-                key, value = line.split('=', 1)
-                # systemd fields that are shell commands can be multi-line
-                # We take a value that begins with a "{" as the start of
-                # a shell command and a line that ends with "}" as the end of
-                # the command
-                if value.lstrip().startswith('{'):
-                    if value.rstrip().endswith('}'):
+            if '=' in line:
+                if not key:
+                    key, value = line.split('=', 1)
+                    # systemd fields that are shell commands can be multi-line
+                    # We take a value that begins with a "{" as the start of
+                    # a shell command and a line that ends with "}" as the end of
+                    # the command
+                    if value.lstrip().startswith('{'):
+                        if value.rstrip().endswith('}'):
+                            status_dict[key] = value
+                            key = None
+                        else:
+                            value_buffer.append(value)
+                    else:
                         status_dict[key] = value
+                        key = None
+                else:
+                    if line.rstrip().endswith('}'):
+                        status_dict[key] = '\n'.join(value_buffer)
                         key = None
                     else:
                         value_buffer.append(value)
-                else:
-                    status_dict[key] = value
-                    key = None
             else:
-                if line.rstrip().endswith('}'):
-                    status_dict[key] = '\n'.join(value_buffer)
-                    key = None
-                else:
-                    value_buffer.append(value)
+                value_buffer.append(value)
 
         return status_dict
 
@@ -941,9 +944,10 @@ class FreeBsdService(Service):
 
     def get_service_tools(self):
         self.svc_cmd = self.module.get_bin_path('service', True)
-
         if not self.svc_cmd:
             self.module.fail_json(msg='unable to find service binary')
+
+        self.sysrc_cmd = self.module.get_bin_path('sysrc')
 
     def get_service_status(self):
         rc, stdout, stderr = self.execute_command("%s %s %s %s" % (self.svc_cmd, self.name, 'onestatus', self.arguments))
@@ -989,10 +993,32 @@ class FreeBsdService(Service):
         if self.rcconf_key is None:
             self.module.fail_json(msg="unable to determine rcvar", stdout=stdout, stderr=stderr)
 
-        try:
-            return self.service_enable_rcconf()
-        except Exception:
-            self.module.fail_json(msg='unable to set rcvar')
+        if self.sysrc_cmd: # FreeBSD >= 9.2
+
+            rc, current_rcconf_value, stderr = self.execute_command("%s -n %s" % (self.sysrc_cmd, self.rcconf_key))
+            if rc != 0:
+                self.module.fail_json(msg="unable to get current rcvar value", stdout=stdout, stderr=stderr)
+
+            if current_rcconf_value.strip().upper() != self.rcconf_value:
+
+                self.changed = True
+
+                if self.module.check_mode:
+                    self.module.exit_json(changed=True, msg="changing service enablement")
+
+                rc, stdout, stderr = self.execute_command("%s %s=\"%s\"" % (self.sysrc_cmd, self.rcconf_key, self.rcconf_value ) )
+                if rc != 0:
+                    self.module.fail_json(msg="unable to set rcvar using sysrc", stdout=stdout, stderr=stderr)
+
+            else:
+                self.changed = False
+
+        else: # Legacy (FreeBSD < 9.2)
+            try:
+                return self.service_enable_rcconf()
+            except Exception:
+                self.module.fail_json(msg='unable to set rcvar')
+
 
     def service_control(self):
 
@@ -1003,7 +1029,12 @@ class FreeBsdService(Service):
         if self.action == "reload":
             self.action = "onereload"
 
-        return self.execute_command("%s %s %s %s" % (self.svc_cmd, self.name, self.action, self.arguments))
+        ret = self.execute_command("%s %s %s %s" % (self.svc_cmd, self.name, self.action, self.arguments))
+
+        if self.sleep:
+            time.sleep(self.sleep)
+
+        return ret
 
 # ===========================================
 # Subclass: OpenBSD

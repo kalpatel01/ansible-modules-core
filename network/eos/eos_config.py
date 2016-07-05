@@ -19,7 +19,7 @@ DOCUMENTATION = """
 ---
 module: eos_config
 version_added: "2.1"
-author: "Peter sprygada (@privateip)"
+author: "Peter Sprygada (@privateip)"
 short_description: Manage Arista EOS configuration sections
 description:
   - Arista EOS configurations use a simple block indent file sytanx
@@ -34,7 +34,7 @@ options:
       - The ordered set of commands that should be configured in the
         section.  The commands must be the exact same commands as found
         in the device running-config.  Be sure to note the configuration
-        command syntanx as some commands are automatically modified by the
+        command syntax as some commands are automatically modified by the
         device config parser.
     required: true
   parents:
@@ -92,7 +92,7 @@ options:
         without first checking if already configured.
     required: false
     default: false
-    choices: BOOLEANS
+    choices: ['yes', 'no']
   config:
     description:
       - The module, by default, will connect to the remote device and
@@ -131,12 +131,6 @@ EXAMPLES = """
     parents: ['ip access-list test']
     before: ['no ip access-list test']
     replace: block
-
-- eos_config:
-    commands: "{{lookup('file', 'datcenter1.txt'}}"
-    parents: ['ip access-list test']
-    before: ['no ip access-list test']
-    replace: block
 """
 
 RETURN = """
@@ -152,45 +146,12 @@ responses:
   type: list
   sample: ['...', '...']
 """
-import re
-import itertools
 
 def get_config(module):
     config = module.params['config'] or dict()
     if not config and not module.params['force']:
         config = module.config
     return config
-
-def build_candidate(lines, parents, config, strategy):
-    candidate = list()
-
-    if strategy == 'strict':
-        if len(lines) != len(config):
-            candidate = list(lines)
-        else:
-            for index, cmd in enumerate(lines):
-                try:
-                    if cmd != config[index]:
-                        candidate.append(cmd)
-                except IndexError:
-                    candidate.append(cmd)
-
-    elif strategy == 'exact':
-        if len(lines) != len(config):
-            candidate = list(lines)
-        else:
-            for cmd, cfg in itertools.izip(lines, config):
-                if cmd != cfg:
-                    candidate = list(lines)
-                    break
-
-    else:
-        for cmd in lines:
-            if cmd not in config:
-                candidate.append(cmd)
-
-    return candidate
-
 
 def main():
     """ main entry point for module execution
@@ -219,47 +180,35 @@ def main():
     match = module.params['match']
     replace = module.params['replace']
 
-    contents = get_config(module)
-    config = module.parse_config(contents)
+    if not module.params['force']:
+        contents = get_config(module)
+        config = NetworkConfig(contents=contents, indent=3)
 
-    if parents:
-        for parent in parents:
-            for item in config:
-                if item.text == parent:
-                    config = item
+        candidate = NetworkConfig(indent=3)
+        candidate.add(lines, parents=parents)
 
-        try:
-            children = [c.text for c in config.children]
-        except AttributeError:
-            children = [c.text for c in config]
-
+        commands = candidate.difference(config, path=parents, match=match, replace=replace)
     else:
-        children = [c.text for c in config if not c.parents]
+        commands = parents
+        commands.extend(lines)
 
     result = dict(changed=False)
 
-    candidate = build_candidate(lines, parents, children, match)
-
-    if candidate:
-        if replace == 'line':
-            candidate[:0] = parents
-        else:
-            candidate = list(parents)
-            candidate.extend(lines)
-
+    if commands:
         if before:
-            candidate[:0] = before
+            commands[:0] = before
 
         if after:
-            candidate.extend(after)
+            commands.extend(after)
 
         if not module.check_mode:
-            response = module.configure(candidate)
+            commands = [str(c).strip() for c in commands]
+            response = module.configure(commands)
             result['responses'] = response
         result['changed'] = True
 
-    result['updates'] = candidate
-    return module.exit_json(**result)
+    result['updates'] = commands
+    module.exit_json(**result)
 
 from ansible.module_utils.basic import *
 from ansible.module_utils.urls import *

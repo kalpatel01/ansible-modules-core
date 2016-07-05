@@ -49,7 +49,7 @@ options:
     required: false
     choices: [ 'sha1', 'sha224', 'sha256', 'sha384', 'sha512' ]
     default: sha1
-    aliases: [ 'checksum_algo' ]
+    aliases: [ 'checksum_algo', 'checksum' ]
     version_added: "2.0"
   mime:
     description:
@@ -305,7 +305,7 @@ import grp
 def main():
     module = AnsibleModule(
         argument_spec = dict(
-            path = dict(required=True),
+            path = dict(required=True, type='path'),
             follow = dict(default='no', type='bool'),
             get_md5 = dict(default='yes', type='bool'),
             get_checksum = dict(default='yes', type='bool'),
@@ -316,7 +316,6 @@ def main():
     )
 
     path = module.params.get('path')
-    path = os.path.expanduser(path)
     follow = module.params.get('follow')
     get_md5 = module.params.get('get_md5')
     get_checksum = module.params.get('get_checksum')
@@ -327,7 +326,8 @@ def main():
             st = os.stat(path)
         else:
             st = os.lstat(path)
-    except OSError, e:
+    except OSError:
+        e = get_exception()
         if e.errno == errno.ENOENT:
             d = { 'exists' : False }
             module.exit_json(changed=False, stat=d)
